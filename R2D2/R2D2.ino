@@ -3,6 +3,7 @@
 #include "TM1637Display.h"
 #include "DFRobotDFPlayerMini.h"
 #include "AiEsp32RotaryEncoder.h"
+#include <ESPmDNS.h>
 
 //========================CONFIGURATIONS==========================================
 
@@ -15,9 +16,11 @@
 #define WHITE_LED_PIN 33
 #define ROTARY_ENCODER_VCC_PIN -1 // VCC pin not used
 #define ROTARY_ENCODER_STEPS 4    // Rotary Encoder
+#define FPSerial Serial1
 
-const char *WIFI_SSID = "R2D2";
-const char *WIFI_PASSWORD = "";
+const char *AP_SSID = "R2D2";
+const char *AP_PASSWORD = "";
+const char *HOSTNAME = "R2D2";
 const char *NTP_POOL_ADDRESS = "ua.pool.ntp.org";
 const long UTC_OFFSET_SECONDS = 3600;             // Offset in seconds
 const int VOLUME_LEVEL = 15;                      // From 0 to 30
@@ -26,6 +29,9 @@ const int TIMEZONE_OFFSET_HOURS = 3;              // UTC + value in hours (Summe
 const int DISPLAY_BACKLIGHT_LEVEL = 0;            // Set display brightness (0 to 7)
 const byte MP3_RX_PIN = 16;                       // Connects to mp3 module's TX
 const byte MP3_TX_PIN = 17;                       // Connects to mp3 module's RX
+const int freq = 5000;
+const int resolution = 8;
+const long OFFSET_IN_SECONDS = 3600 * 3; // Offset in seconds for GMT + 3
 //===================================================================================
 
 //========================VARIABLES==================================================
@@ -42,9 +48,6 @@ void IRAM_ATTR readEncoderISR()
   rotaryEncoder.readEncoder_ISR();
 }
 
-#define FPSerial Serial1
-const int freq = 5000;
-const int resolution = 8;
 bool wifi_is_connected;
 unsigned long colon_previous_millis = 0;
 unsigned long last_time_button_pressed = 0;
@@ -58,7 +61,7 @@ bool show_colon = true;
 
 DFRobotDFPlayerMini mp3_df_player;
 WiFiUDP wifi_udp_client;
-NTPClient ntp_client(wifi_udp_client, NTP_POOL_ADDRESS, UTC_OFFSET_SECONDS *TIMEZONE_OFFSET_HOURS);
+NTPClient ntp_client(wifi_udp_client, NTP_POOL_ADDRESS, OFFSET_IN_SECONDS);
 TM1637Display digits_display(DISPLAY_CLK_PIN, DISPLAY_DIO_PIN);
 //========================================================================================
 
@@ -90,14 +93,16 @@ void setupWiFi()
   Serial.begin(9600);
 
   WiFiManager wifiManager;
-  wifiManager.setHostname("R2D2");
+  wifiManager.setHostname(HOSTNAME);
   wifiManager.setTimeout(180);
-  // fetches ssid and password and tries to connect, if connections succeeds it starts an access point with the name called "R2D2" and waits in a blocking loop for configuration
-  wifi_is_connected = wifiManager.autoConnect(WIFI_SSID, WIFI_PASSWORD);
+  wifi_is_connected = wifiManager.autoConnect(AP_SSID, AP_PASSWORD);
   if (!wifi_is_connected)
   {
-    Serial.println("failed to connect and timeout occurred");
-    ESP.restart(); // reset and try again
+    Serial.println("failed to connect to wifi");
+  }
+  if (MDNS.begin(HOSTNAME))
+  {
+    Serial.println("MDNS responder started");
   }
 }
 
