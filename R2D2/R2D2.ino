@@ -1,39 +1,49 @@
-#include "WiFiManager.h"
+#include "AiEsp32RotaryEncoder.h"
+#include "DFRobotDFPlayerMini.h"
 #include "NTPClient.h"
 #include "TM1637Display.h"
-#include "DFRobotDFPlayerMini.h"
-#include "AiEsp32RotaryEncoder.h"
+#include "WiFiManager.h"
+#include <AsyncTCP.h>
+#include <ElegantOTA.h>
+#include <ESPAsyncWebServer.h>
+#include <ESPmDNS.h>
 
-//========================CONFIGURATIONS==========================================
+#define FPSerial Serial1
+// #define ELEGANTOTA_USE_ASYNC_WEBSERVER 1 // Add this row to the ElegantOTA sources at the beginning of the ElegantOTA.h file
 
-#define DISPLAY_CLK_PIN 21
-#define DISPLAY_DIO_PIN 22
-#define ROTARY_ENCODER_CLK_R_PIN 25
-#define ROTARY_ENCODER_DT_PIN 26
-#define ROTARY_ENCODER_SW_PIN 27
-#define RED_LED_PIN 32
-#define WHITE_LED_PIN 33
-#define ROTARY_ENCODER_VCC_PIN -1 // VCC pin not used
-#define ROTARY_ENCODER_STEPS 4    // Rotary Encoder
+//========================PINS DEFINITIONS==============================================================================================================================
+const byte DISPLAY_CLK_PIN = 21;          // Connects to display's CLK pin
+const byte DISPLAY_DIO_PIN = 22;          // Connects to display's DIO pin
+const byte ROTARY_ENCODER_CLK_R_PIN = 25; // Connects to encoder's DIO pin
+const byte ROTARY_ENCODER_DT_PIN = 26;    // Connects to encoder's DT pin
+const byte ROTARY_ENCODER_SW_PIN = 27;    // Connects to encoder's SW pin
+const byte RED_LED_PIN = 32;              // Connects to RED LED + leg
+const byte WHITE_LED_PIN = 33;            // Connects to WHITE LED + leg
+const byte MP3_RX_PIN = 16;               // Connects to mp3 module's TX
+const byte MP3_TX_PIN = 17;               // Connects to mp3 module's RX
+//======================================================================================================================================================================
 
-const char *WIFI_SSID = "R2D2";
-const char *WIFI_PASSWORD = "";
-const char *NTP_POOL_ADDRESS = "ua.pool.ntp.org";
-const long UTC_OFFSET_SECONDS = 3600;             // Offset in seconds
-const int VOLUME_LEVEL = 15;                      // From 0 to 30
-const int MS_TO_HANDLE_IF_BUTTON_IS_PRESSED = 50; // if 50ms have passed since last LOW pulse, it means that the button has been pressed, released and pressed again
-const int TIMEZONE_OFFSET_HOURS = 3;              // UTC + value in hours (Summer time)
-const int DISPLAY_BACKLIGHT_LEVEL = 0;            // Set display brightness (0 to 7)
-const byte MP3_RX_PIN = 16;                       // Connects to mp3 module's TX
-const byte MP3_TX_PIN = 17;                       // Connects to mp3 module's RX
-//===================================================================================
+//========================CONFIGURATIONS================================================================================================================================
+const char *VERSION = "2.0";                               // App version
+const char *AP_SSID = "R2D2";                              // SSID that will appear at first launch or in case of saved network not found
+const char *AP_PASSWORD = "";                              // SSID password that will appear at first launch or in case of saved network not found
+const char *HOSTNAME = "R2D2";                             // Hostname of the device that will be shown
+const char *NTP_POOL_ADDRESS = "ua.pool.ntp.org";          // NTP server address (change to what you need, choose at at https://www.ntppool.org/)
+const unsigned int WIFI_CONNECTION_TIMEOUT_IN_MS = 10000;  // 10 seconds to connect to wifi
+const unsigned int GMT_TIMEZONE_PLUS_HOUR = 2;             // GMT + 2 timezone (Ukrainian Winter time)
+const unsigned int VOLUME_LEVEL = 15;                      // From 0 to 30
+const unsigned int MS_TO_HANDLE_IF_BUTTON_IS_PRESSED = 50; // if 50ms have passed since last LOW pulse, it means that the button has been pressed, released and pressed again
+const unsigned int DISPLAY_BACKLIGHT_LEVEL = 0;            // Set display brightness (0 to 7)
+const unsigned int freq = 5000;
+const unsigned int resolution = 8;
+//======================================================================================================================================================================
 
-//========================VARIABLES==================================================
+//========================VARIABLES=====================================================================================================================================
 AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(ROTARY_ENCODER_CLK_R_PIN,
                                                           ROTARY_ENCODER_DT_PIN,
                                                           ROTARY_ENCODER_SW_PIN,
-                                                          ROTARY_ENCODER_VCC_PIN,
-                                                          ROTARY_ENCODER_STEPS);
+                                                          -1,
+                                                          4);
 
 void printErrorDetails(uint8_t type, int value);
 
@@ -42,10 +52,10 @@ void IRAM_ATTR readEncoderISR()
   rotaryEncoder.readEncoder_ISR();
 }
 
-#define FPSerial Serial1
-const int freq = 5000;
-const int resolution = 8;
-bool wifi_is_connected;
+bool ntp_client_updated_on_startup = false;
+bool wifi_is_connected = false;
+bool mp3_player_is_connected = false;
+bool show_colon = true;
 unsigned long colon_previous_millis = 0;
 unsigned long last_time_button_pressed = 0;
 int encoder_pin_state = 0;
@@ -54,96 +64,26 @@ int timer_minutes = 0;
 float timer_counter = 0;
 float value_from_encoder = 0;
 float red_led_brightness = 0;
-bool show_colon = true;
 
 DFRobotDFPlayerMini mp3_df_player;
 WiFiUDP wifi_udp_client;
-NTPClient ntp_client(wifi_udp_client, NTP_POOL_ADDRESS, UTC_OFFSET_SECONDS *TIMEZONE_OFFSET_HOURS);
+NTPClient ntp_client(wifi_udp_client, NTP_POOL_ADDRESS, GMT_TIMEZONE_PLUS_HOUR * 3600);
 TM1637Display digits_display(DISPLAY_CLK_PIN, DISPLAY_DIO_PIN);
-//========================================================================================
+AsyncWebServer async_web_server(80);
+//=======================================================================================================================================================================
 
-//========================SETUP===========================================================
-void setup()
-{
-  setupLeds();
-  digits_display.setBrightness(DISPLAY_BACKLIGHT_LEVEL);
-  showTime(0, 0);
-
-  setupWiFi();
-  ntp_client.begin();
-  setupDFPlayer();
-  setupEncoder();
-
-  Serial.println("\n Starting");
-}
-
-void setupLeds()
-{
-  pinMode(RED_LED_PIN, OUTPUT);
-  pinMode(WHITE_LED_PIN, OUTPUT);
-
-  ledcAttach(RED_LED_PIN, freq, resolution);
-}
-
-void setupWiFi()
-{
-  Serial.begin(9600);
-
-  WiFiManager wifiManager;
-  wifiManager.setHostname("R2D2");
-  wifiManager.setTimeout(180);
-  // fetches ssid and password and tries to connect, if connections succeeds it starts an access point with the name called "R2D2" and waits in a blocking loop for configuration
-  wifi_is_connected = wifiManager.autoConnect(WIFI_SSID, WIFI_PASSWORD);
-  if (!wifi_is_connected)
-  {
-    Serial.println("failed to connect and timeout occurred");
-    ESP.restart(); // reset and try again
-  }
-}
-
-void setupEncoder()
-{
-  rotaryEncoder.begin();
-  rotaryEncoder.setup(readEncoderISR);
-  rotaryEncoder.setBoundaries(0, 3500, false); // minValue, maxValue, circleValues true|false (when max go to min and vice versa)
-  rotaryEncoder.setAcceleration(250);
-}
-
-void setupDFPlayer()
-{
-  FPSerial.begin(9600, SERIAL_8N1, MP3_RX_PIN, MP3_TX_PIN);
-  Serial.println();
-  Serial.println(F("DFRobot DFPlayer Mini Demo"));
-  Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
-
-  if (!mp3_df_player.begin(FPSerial, /*isACK = */ true, /*doReset = */ true))
-  {
-    // Use serial to communicate with mp3.
-    Serial.println(F("Unable to begin:"));
-    Serial.println(F("1.Please recheck the connection!"));
-    Serial.println(F("2.Please insert the SD card!"));
-    while (true)
-    {
-      delay(0); // Code to compatible with ESP8266 watch dog.
-    }
-  }
-  Serial.println(F("DFPlayer Mini online."));
-  mp3_df_player.volume(VOLUME_LEVEL);
-  mp3_df_player.play(1);
-}
-
-//========================================================================================
-
-//========================LOOP============================================================
+//========================LOOP===========================================================================================================================================
 void loop()
 {
+  checkWifiConnectionAndReconnectIfLost();
   if (secondChanged())
   {
     show_colon = !show_colon;
   }
   showTime();
 
-  if (mp3_df_player.available() == false)
+  mp3_player_is_connected = mp3_df_player.available();
+  if (!mp3_player_is_connected)
   {
     printErrorDetails(mp3_df_player.readType(), mp3_df_player.read());
   }
@@ -172,17 +112,44 @@ void loop()
     last_time_button_pressed = millis();
   }
 
+  ElegantOTA.loop();
   delay(1);
-  handleWinterTime();
 }
-//========================================================================================
+//=======================================================================================================================================================================
+
+void checkWifiConnectionAndReconnectIfLost()
+{
+  wifi_is_connected = WiFi.status() == WL_CONNECTED;
+
+  if (!wifi_is_connected)
+  {
+    Serial.println("WiFi connection lost, trying to reconnect...");
+    WiFi.disconnect();
+    WiFi.mode(WIFI_STA);
+    WiFi.hostname(HOSTNAME);
+    WiFi.begin(AP_SSID, AP_PASSWORD);
+    unsigned long startAttemptTime = millis();
+    const unsigned long connectionTimeout = 10000;
+
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < connectionTimeout)
+    {
+      delay(500);
+      Serial.print(".");
+    }
+
+    wifi_is_connected = WiFi.status() == WL_CONNECTED;
+  }
+}
 
 bool setupTimer()
 {
-  showTime(00, 00);
+  showDigitsOnDisplay(00, 00, show_colon);
   digitalWrite(RED_LED_PIN, HIGH);
   digitalWrite(WHITE_LED_PIN, HIGH);
-  mp3_df_player.play(2);
+  if (mp3_player_is_connected)
+  {
+    mp3_df_player.play(2);
+  }
   delay(500);
 
   encoder_pin_state = digitalRead(ROTARY_ENCODER_SW_PIN);
@@ -205,7 +172,7 @@ bool setupTimer()
 
     timer_minutes = timer_counter > 0 ? (timer_counter / 60) : 0;
     timer_seconds = timer_counter > 0 ? (((timer_counter / 60) - timer_minutes) * 60) : 0;
-    showTime(timer_minutes, timer_seconds);
+    showDigitsOnDisplay(timer_minutes, timer_seconds, show_colon);
   }
 
   bool timerUsed = (timer_counter > 0);
@@ -218,7 +185,10 @@ bool setupTimer()
 
 void startCountdown(float timer_counter)
 {
-  mp3_df_player.play(8);
+  if (mp3_player_is_connected)
+  {
+    mp3_df_player.play(8);
+  }
 
   delay(1000);
   encoder_pin_state = digitalRead(ROTARY_ENCODER_SW_PIN);
@@ -231,26 +201,35 @@ void startCountdown(float timer_counter)
       timer_counter = timer_counter > 0 ? (timer_counter - 0.1) : 0;
       timer_minutes = timer_counter > 0 ? (timer_counter / 60) : 0;
       timer_seconds = timer_counter > 0 ? (((timer_counter / 60) - timer_minutes) * 60) : 0;
-      showTime(timer_minutes, timer_seconds);
+      showDigitsOnDisplay(timer_minutes, timer_seconds, show_colon);
       delay(70);
       digitalWrite(RED_LED_PIN, LOW);
     }
 
     if (timer_counter <= 0)
     {
-      mp3_df_player.play(3);
+      if (mp3_player_is_connected)
+      {
+        mp3_df_player.play(8);
+      }
       for (int i = 0; i < 9; i++)
       {
         animationsForEndOfCountdown();
       }
 
-      mp3_df_player.play(5);
+      if (mp3_player_is_connected)
+      {
+        mp3_df_player.play(5);
+      }
       for (int i = 0; i < 9; i++)
       {
         animationsForEndOfCountdown();
       }
 
-      mp3_df_player.play(7);
+      if (mp3_player_is_connected)
+      {
+        mp3_df_player.play(7);
+      }
       for (int i = 0; i < 9; i++)
       {
         animationsForEndOfCountdown();
@@ -286,44 +265,31 @@ void waitMilliseconds(uint16_t msWait)
 
 void showTime()
 {
-  ntp_client.update();
-  showTime(ntp_client.getHours(), ntp_client.getMinutes());
-}
-
-void showTime(int hour, int minutes)
-{
-  uint8_t colonOptions = show_colon ? 0b01000000 : 0b00000000;
-  digits_display.showNumberDecEx(hour, colonOptions, true, 2, 0);
-  digits_display.showNumberDecEx(minutes, colonOptions, true, 2, 2);
-}
-
-void handleWinterTime()
-{
-
-  Serial.print("Time: ");
-  Serial.println(ntp_client.getFormattedTime());
-  unsigned long epochTime = ntp_client.getEpochTime();
-  struct tm *ptm = gmtime((time_t *)&epochTime);
-  int currentYear = ptm->tm_year + 1900;
-  Serial.print("Year: ");
-  Serial.println(currentYear);
-
-  int monthDay = ptm->tm_mday;
-  Serial.print("Month day: ");
-  Serial.println(monthDay);
-
-  int currentMonth = ptm->tm_mon + 1;
-  Serial.print("Month: ");
-  Serial.println(currentMonth);
-
-  if ((currentMonth * 30 + monthDay) >= 121 && (currentMonth * 30 + monthDay) < 331)
+  bool ntp_client_updated = false;
+  if (wifi_is_connected)
   {
-    ntp_client.setTimeOffset(UTC_OFFSET_SECONDS * TIMEZONE_OFFSET_HOURS);
-  } // Change daylight saving time - Summer - change 31/03 at 00:00
+    ntp_client_updated = ntp_client.update();
+  }
+  if (!ntp_client_updated && !ntp_client_updated_on_startup)
+  {
+    turn_off_display();
+  }
   else
   {
-    ntp_client.setTimeOffset((UTC_OFFSET_SECONDS * TIMEZONE_OFFSET_HOURS) - 3600);
-  } // Change daylight saving time - Winter - change 31/10 at 00:00
+    turn_on_display();
+    if (secondChanged())
+    {
+      show_colon = !show_colon;
+    }
+    showDigitsOnDisplay(ntp_client.getHours(), ntp_client.getMinutes(), show_colon);
+  }
+}
+
+void showDigitsOnDisplay(int hour, int minutes, bool showColon)
+{
+  uint8_t colonOptions = showColon ? 0b01000000 : 0b00000000;
+  digits_display.showNumberDecEx(hour, colonOptions, true, 2, 0);
+  digits_display.showNumberDecEx(minutes, colonOptions, true, 2, 2);
 }
 
 void printErrorDetails(uint8_t type, int value)
@@ -401,4 +367,34 @@ bool secondChanged()
   }
 
   return false;
+}
+
+void showLoadingOnDigitsDisplay()
+{
+  turn_on_display();
+  uint8_t frames[][4] = {
+      {0x01 | 0x02, 0x01 | 0x02, 0x01 | 0x02, 0x01 | 0x02}, // Upper horizontal and right upper
+      {0x02 | 0x04, 0x02 | 0x04, 0x02 | 0x04, 0x02 | 0x04}, // Right upper and right lower
+      {0x04 | 0x08, 0x04 | 0x08, 0x04 | 0x08, 0x04 | 0x08}, // Right lower and bottom horizontal
+      {0x08 | 0x10, 0x08 | 0x10, 0x08 | 0x10, 0x08 | 0x10}, // Bottom horizontal and left lower
+      {0x10 | 0x20, 0x10 | 0x20, 0x10 | 0x20, 0x10 | 0x20}, // Left lower and left upper
+      {0x20 | 0x01, 0x20 | 0x01, 0x20 | 0x01, 0x20 | 0x01}, // Left upper and upper horizontal
+  };
+
+  static int currentFrame = 0; // Current animation frame
+  digits_display.setSegments(frames[currentFrame]);
+  currentFrame = (currentFrame + 1) % 6; // Move to the next frame
+  delay(500);
+  turn_off_display();
+}
+
+void turn_off_display()
+{
+  digits_display.clear();
+  digits_display.setBrightness(0, false);
+}
+
+void turn_on_display()
+{
+  digits_display.setBrightness(DISPLAY_BACKLIGHT_LEVEL, true);
 }
