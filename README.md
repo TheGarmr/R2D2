@@ -26,3 +26,10 @@
 The initial code and 3D model was done by [jeje95](https://www.thingiverse.com/jeje95)<br>
 [Thingiverse](https://www.thingiverse.com/thing:4870453)<br>
 [GitHub](https://github.com/jejelinge/R2D2_CLOCK_AND_TIMER)
+
+| ESP32            | DS3231 |
+| ---------------- | ------ |
+| 3.3V             | VCC    |
+| GPIO21(I2C SDA)  | SDA    |
+| GPIO22 (I2C SCL) | SCL    |
+| GND              | GND    |
