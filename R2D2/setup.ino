@@ -1,6 +1,7 @@
 //========================SETUP===========================================================
 void setup()
 {
+  EEPROM.begin(EEPROM_SIZE);
   setupLeds();
   setupDFPlayer();
   digits_display.setBrightness(DISPLAY_BACKLIGHT_LEVEL);
@@ -12,7 +13,7 @@ void setup()
 
   if (wifi_is_connected)
   {
-    ntp_client_updated_on_startup = ntp_client.update();
+    setupNtpClient();
     turn_on_display();
   }
 
@@ -76,22 +77,27 @@ void setupDFPlayer()
 void setupWebServer()
 {
   async_web_server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-                      { request->send(200, "text/html", "I'm online and running. Version: " + String(VERSION) + "<br><a href=\"/update\">OTA Update</a>"); });
+                      { handle_web_root_query(request); });
 
   async_web_server.on("/version", HTTP_GET, [](AsyncWebServerRequest *request)
                       { request->send(200, "text/plain", String(VERSION)); });
 
   async_web_server.on("/reboot", HTTP_POST, [](AsyncWebServerRequest *request)
-                      {
-              request->send(200, "text/plain", "rebooting");
-              AsyncWebServerRequest* req = request;
-              req->onDisconnect([]()
-              {
-                  turn_off_display();
-                  delay(500);
-                  ESP.restart();
-              }); });
+                      { handle_reboot_query(request); });
+
+  async_web_server.on("/toggle-time", HTTP_POST, [](AsyncWebServerRequest *request)
+                      { handle_toggle_time_query(request); });
   async_web_server.begin();
+}
+
+void setupNtpClient()
+{
+  is_summer_time = EEPROM.read(EEPROM_WINTER_TIME_ADDR) == 1;
+
+  unsigned long gmt_offset = 3600 * (GMT_TIMEZONE_PLUS_HOUR + (is_summer_time ? 1 : 0));
+  ntp_client = new NTPClient(wifi_udp_client, NTP_POOL_ADDRESS, gmt_offset, NTP_CLIENT_UPDATE_TIME_IN_MS);
+  ntp_client->begin();
+  ntp_client_updated_on_startup = ntp_client->update();
 }
 
 //========================================================================================
