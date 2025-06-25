@@ -7,8 +7,11 @@
 #include <ElegantOTA.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
+#include <EEPROM.h>
 
 #define FPSerial Serial1
+#define EEPROM_WINTER_TIME_ADDR 0
+#define EEPROM_SIZE 1
 // #define ELEGANTOTA_USE_ASYNC_WEBSERVER 1 // Add this row to the ElegantOTA sources at the beginning of the ElegantOTA.h file
 
 //========================PINS DEFINITIONS==============================================================================================================================
@@ -24,7 +27,7 @@ const byte MP3_TX_PIN = 17;               // Connects to mp3 module's RX
 //======================================================================================================================================================================
 
 //========================CONFIGURATIONS================================================================================================================================
-const char *VERSION = "2.0";                               // App version
+const char *VERSION = "2.1";                               // App version
 const char *AP_SSID = "R2D2";                              // SSID that will appear at first launch or in case of saved network not found
 const char *AP_PASSWORD = "";                              // SSID password that will appear at first launch or in case of saved network not found
 const char *HOSTNAME = "R2D2";                             // Hostname of the device that will be shown
@@ -36,6 +39,7 @@ const unsigned int MS_TO_HANDLE_IF_BUTTON_IS_PRESSED = 50; // if 50ms have passe
 const unsigned int DISPLAY_BACKLIGHT_LEVEL = 0;            // Set display brightness (0 to 7)
 const unsigned int freq = 5000;
 const unsigned int resolution = 8;
+const unsigned long NTP_CLIENT_UPDATE_TIME_IN_MS = 3600000;// One hour
 //======================================================================================================================================================================
 
 //========================VARIABLES=====================================================================================================================================
@@ -56,6 +60,7 @@ bool ntp_client_updated_on_startup = false;
 bool wifi_is_connected = false;
 bool mp3_player_is_connected = false;
 bool show_colon = true;
+bool is_summer_time = false;
 unsigned long colon_previous_millis = 0;
 unsigned long last_time_button_pressed = 0;
 int encoder_pin_state = 0;
@@ -67,9 +72,143 @@ float red_led_brightness = 0;
 
 DFRobotDFPlayerMini mp3_df_player;
 WiFiUDP wifi_udp_client;
-NTPClient ntp_client(wifi_udp_client, NTP_POOL_ADDRESS, GMT_TIMEZONE_PLUS_HOUR * 3600);
+NTPClient *ntp_client;
 TM1637Display digits_display(DISPLAY_CLK_PIN, DISPLAY_DIO_PIN);
 AsyncWebServer async_web_server(80);
+
+const char *indexPageHtml = R"rawliteral(
+<html>
+
+<head>
+    <title>R2-D2 Control Panel</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron&display=swap');
+
+        body {
+            font-family: 'Orbitron', sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            background-color: #000;
+            color: #1effd6;
+            min-height: 100vh;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            text-shadow: 0 0 10px #1effd6, 0 0 20px #1effd6;
+        }
+
+        a {
+            font-size: 1.2rem;
+            color: #1effd6;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border: 2px solid #1effd6;
+            border-radius: 5px;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        a:hover {
+            background-color: #1effd6;
+            color: #000;
+        }
+
+        .toggle-container {
+            margin-top: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .toggle {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+
+        .toggle input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #444;
+            transition: .4s;
+            border-radius: 34px;
+            box-shadow: 0 0 10px #1effd6;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked+.slider {
+            background-color: #1effd6;
+            box-shadow: 0 0 15px #1effd6;
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(26px);
+        }
+
+        .r2d2-img {
+            width: 120px;
+            height: auto;
+            margin-bottom: 20px;
+            filter: drop-shadow(0 0 10px #1effd6);
+        }
+    </style>
+</head>
+
+<body>
+    <img class="r2d2-img" src="https:\/\/i.imgur.com/8PdU9nS.png" alt="R2-D2">
+    <h1>R2-D2 Control Panel</h1>
+    <a href="/update">OTA Update</a>
+    <div class="toggle-container">
+        <label>Winter Time</label>
+        <label class="toggle">
+            <input type="checkbox" id="timeToggle" onclick="confirmToggle()" %%TOGGLE_STATE%%>
+            <span class="slider"></span>
+        </label>
+        <label>Summer Time</label>
+    </div>
+    <script>
+        function confirmToggle() {
+            if (confirm("Are you sure you want to change the time setting? The galaxy depends on it!")) {
+                fetch("/toggle-time", { method: "POST" })
+                    .then(response => location.reload());
+            } else {
+                document.getElementById("timeToggle").checked = !document.getElementById("timeToggle").checked;
+            }
+        }
+    </script>
+</body>
+
+</html>
+  )rawliteral";
+
 //=======================================================================================================================================================================
 
 //========================LOOP===========================================================================================================================================
@@ -268,7 +407,7 @@ void showTime()
   bool ntp_client_updated = false;
   if (wifi_is_connected)
   {
-    ntp_client_updated = ntp_client.update();
+    ntp_client_updated = ntp_client->update();
   }
   if (!ntp_client_updated && !ntp_client_updated_on_startup)
   {
@@ -281,7 +420,7 @@ void showTime()
     {
       show_colon = !show_colon;
     }
-    showDigitsOnDisplay(ntp_client.getHours(), ntp_client.getMinutes(), show_colon);
+    showDigitsOnDisplay(ntp_client->getHours(), ntp_client->getMinutes(), show_colon);
   }
 }
 
